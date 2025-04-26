@@ -1,0 +1,23 @@
+model:
+  backbone: "levit_128"
+  embedding_dim: 128
+  pretrained: true
+
+training:
+  batch_size: 32
+  num_epochs: 2
+  learning_rate: 0.0001
+  margin: 1.0
+  loss_type: "triplet"
+  sampling_strategy: "semi_hard"
+  seed: 137
+
+validation:
+  k: 1
+
+data:
+  caltech_dir: "256_ObjectCategories"
+  val_csv: "val.csv"
+
+exp_name: "triplet_semi_hard_lr1e4"
+device: "cuda"
