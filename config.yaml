@@ -6,19 +6,20 @@ model:
 training:
   batch_size: 32
   num_epochs: 2
-  learning_rate: 0.0001
+  learning_rate: 0.0005
   margin: 1.0
-  loss_type: "triplet"
+  loss_type: "arcface"
   sampling_strategy: "semi_hard"
+  arcface_easy_margin: true
   seed: 137
 
 validation:
   k: 1
-  method: "original"
+  method: "average"
 
 data:
   caltech_dir: "256_ObjectCategories"
   val_csv: "val.csv"
 
-exp_name: "triplet_semi_hard_lr1e4_origval"
+exp_name: "arcface_lr5e4_avgval"
 device: "cuda"
