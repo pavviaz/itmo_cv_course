@@ -398,3 +398,9 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+venv/
+extacted_frames/
+model_bboxed_frames/
+model_frames_labels/
+*.pth.tar

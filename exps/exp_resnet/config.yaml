@@ -1,0 +1,37 @@
+training:
+  seed: 137
+  learning_rate: 5e-5
+  batch_size: 16
+  weight_decay: 0
+  epochs: 50
+  num_workers: 4
+  pin_memory: True
+  device: "cuda"
+  freeze_backbone: True
+  unfreeze_epoch: 5
+  lr_fine_tune: 1e-5
+
+model:
+  backbone: 'resnet18'
+  S: 7
+  B: 2
+  C: 2
+
+dataset:
+  img_dir_train: "extacted_frames/train/"
+  label_dir_train: "model_frames_labels/train/"
+  img_dir_test: "extacted_frames/test/"
+  label_dir_test: "model_frames_labels/test/"
+  image_size: 448
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+evaluation:
+  map_iou_thresh: 0.5
+  nms_iou_thresh: 0.5
+  conf_threshold: 0.4
+
+checkpoint:
+  save_dir: "exps/exp_resnet"
+  save_last_filename: "last_checkpoint.pth.tar"
+  save_best_filename_prefix: "best_checkpoint"
