@@ -1,11 +1,13 @@
 import os
 import random
+import math
 import pandas as pd
 from PIL import Image
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import timm
@@ -126,12 +128,57 @@ class EmbeddingNet(nn.Module):
         return x
 
 
+class ArcFaceLoss(nn.Module):
+    def __init__(
+        self, in_features, out_features, s=64.0, m=0.50, easy_margin=False, eps=1e-6
+    ):
+        super(ArcFaceLoss, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.s = s
+        self.m = m
+        self.eps = eps
+
+        self.weight = nn.Parameter(torch.FloatTensor(out_features, in_features))
+        nn.init.xavier_uniform_(self.weight)
+
+        self.easy_margin = easy_margin
+        self.cos_m = math.cos(m)
+        self.sin_m = math.sin(m)
+        self.th = math.cos(math.pi - m)
+        self.mm = math.sin(math.pi - m) * m
+
+    def forward(self, input_embeddings, label):
+        x = F.normalize(input_embeddings)
+        W = F.normalize(self.weight)
+
+        cosine = F.linear(x, W)
+        sine = torch.sqrt(1.0 - torch.pow(cosine, 2).clamp(0, 1) + self.eps)
+        phi = cosine * self.cos_m - sine * self.sin_m
+
+        if self.easy_margin:
+            phi = torch.where(cosine > self.th, phi, cosine - self.mm)
+        else:
+            phi = torch.where(cosine > self.cos_m, phi, cosine - self.mm)
+
+        one_hot = torch.zeros(cosine.size(), device=input_embeddings.device)
+        one_hot.scatter_(1, label.view(-1, 1).long(), 1)
+
+        output_logits = (one_hot * phi) + ((1.0 - one_hot) * cosine)
+        output_logits *= self.s
+
+        loss = F.cross_entropy(output_logits, label)
+        return loss
+
+
 def train_one_epoch(model, dataloader, optimizer, device, config):
     model.train()
     running_loss = 0.0
     loss_type = config["training"]["loss_type"]
     margin = config["training"]["margin"]
     sampling_strategy = config["training"]["sampling_strategy"]
+    embedding_dim = config["model"]["embedding_dim"]
+    num_classes = len(dataloader.dataset.label_to_idx)
 
     if loss_type == "triplet":
         criterion = nn.TripletMarginLoss(margin=margin, p=2)
@@ -141,6 +188,24 @@ def train_one_epoch(model, dataloader, optimizer, device, config):
             embedding_size=config["model"]["embedding_dim"],
         )
         criterion.to(device)
+    elif loss_type == "arcface":
+        # Use easy_margin=False for standard ArcFace behavior
+        criterion = ArcFaceLoss(
+            in_features=embedding_dim,
+            out_features=num_classes,
+            easy_margin=config["training"]["arcface_easy_margin"],
+        ).to(device)
+        arcface_params = list(criterion.parameters())
+        if arcface_params:
+            optimizer_param_ids = {
+                id(p) for group in optimizer.param_groups for p in group["params"]
+            }
+            new_params = [p for p in arcface_params if id(p) not in optimizer_param_ids]
+            if new_params:
+                print(
+                    f"Adding {len(new_params)} ArcFaceLoss parameters to the optimizer."
+                )
+                optimizer.add_param_group({"params": new_params})
 
     for batch_idx, batch in tqdm(enumerate(dataloader)):
         anchor, positive, negative, anchor_label, negative_label = batch
@@ -211,6 +276,12 @@ def train_one_epoch(model, dataloader, optimizer, device, config):
         elif loss_type == "proxy_nca":
             embeddings = torch.cat([anchor_out, positive_out, negative_out], dim=0)
             labels = torch.cat([anchor_label, anchor_label, negative_label], dim=0)
+            loss = criterion(embeddings, labels)
+        elif loss_type == "arcface":
+            inputs = torch.cat([anchor, positive, negative], dim=0)
+            labels = torch.cat([anchor_label, anchor_label, negative_label], dim=0)
+
+            embeddings = model(inputs)
             loss = criterion(embeddings, labels)
 
         loss.backward()

@@ -403,3 +403,9 @@ venv/
 public_data/
 256_ObjectCategories/
 *.pth
+exps_pigsonly/
+extacted_frames/
+model_bboxed_frames/
+model_frames_labels/
+*/exp_resnet/
+*/exp_default/
