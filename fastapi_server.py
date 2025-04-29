@@ -4,10 +4,19 @@ import asyncio
 import glob
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from filterpy.kalman import KalmanFilter
 
-# from track_5 import track_data, country_balls_amount
-# from track_10 import track_data, country_balls_amount
-from track_20 import track_data, country_balls_amount
+# from track_5_rr3_bb10 import track_data, country_balls_amount
+# from track_5_rr5_bb25 import track_data, country_balls_amount
+# from track_5_rr10_bb50 import track_data, country_balls_amount
+
+# from track_10_rr3_bb10 import track_data, country_balls_amount
+# from track_10_rr5_bb25 import track_data, country_balls_amount
+# from track_10_rr10_bb50 import track_data, country_balls_amount
+
+# from track_20_rr3_bb10 import track_data, country_balls_amount
+# from track_20_rr5_bb25 import track_data, country_balls_amount
+from track_20_rr10_bb50 import track_data, country_balls_amount
 
 
 app = FastAPI(title="Tracker assignment")
@@ -26,9 +35,7 @@ next_track_id = 0
 MAX_AGE = 5  # how much frames a track can live without detection
 
 MAX_AGE_STRONG = 7
-MIN_HITS_STRONG = 3
 IOU_THRESHOLD_STRONG = 0.1
-DISTANCE_THRESHOLD_STRONG = 50
 
 MAX_AGE_SOFT = 3
 DISTANCE_THRESHOLD_SOFT = 100  # max distance between tracks
@@ -47,8 +54,9 @@ def calc_distance(center1, center2):
 
 
 def calc_iou(bbox1, bbox2):
-    if not bbox1 or not bbox2:
+    if bbox1 is None or bbox2 is None or not bbox1.any() or not bbox2.any():
         return 0.0
+
     xA = max(bbox1[0], bbox2[0])
     yA = max(bbox1[1], bbox2[1])
     xB = min(bbox1[2], bbox2[2])
@@ -60,9 +68,107 @@ def calc_iou(bbox1, bbox2):
 
     box1Area = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
     box2Area = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
-
     iou = interArea / float(box1Area + box2Area - interArea)
     return iou
+
+
+def bbox_to_center_wh(bbox):
+    """Converts [x1, y1, x2, y2] bbox to [cx, cy, w, h]"""
+    if not bbox or len(bbox) != 4:
+        return None
+    w = bbox[2] - bbox[0]
+    h = bbox[3] - bbox[1]
+    cx = bbox[0] + w / 2.0
+    cy = bbox[1] + h / 2.0
+    return np.array([cx, cy, w, h])
+
+
+def center_wh_to_bbox(center_wh):
+    """Converts [cx, cy, w, h] to [x1, y1, x2, y2] bbox"""
+    if center_wh is None or len(center_wh) < 4:
+        return None
+    cx, cy, w, h = center_wh[:4]
+    x1 = cx - w / 2.0
+    y1 = cy - h / 2.0
+    x2 = cx + w / 2.0
+    y2 = cy + h / 2.0
+    return np.array([x1, y1, x2, y2], dtype=int)
+
+
+active_tracks_kalman = {}
+next_track_id_kalman = 0
+
+
+class KalmanTrack:
+    def __init__(self, detection_bbox, track_id):
+        self.id = track_id
+        self.kf = KalmanFilter(dim_x=6, dim_z=4)
+
+        self.kf.F = np.array(
+            [
+                [1, 0, 0, 0, 1, 0],
+                [0, 1, 0, 0, 0, 1],
+                [0, 0, 1, 0, 0, 0],
+                [0, 0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 1],
+            ],
+            dtype=float,
+        )
+        self.kf.H = np.array(
+            [
+                [1, 0, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0, 0],
+                [0, 0, 0, 1, 0, 0],
+            ],
+            dtype=float,
+        )
+
+        self.kf.P = np.diag([10.0, 10.0, 10.0, 10.0, 1000.0, 1000.0]) * 10
+        self.kf.R = np.diag([5.0, 5.0, 5.0, 5.0]) * 1
+        self.kf.Q = np.diag([1.0, 1.0, 1.0, 1.0, 10.0, 10.0]) * 0.1
+
+        initial_state_z = bbox_to_center_wh(detection_bbox)
+        self.kf.x = np.array(
+            [
+                initial_state_z[0],
+                initial_state_z[1],
+                initial_state_z[2],
+                initial_state_z[3],
+                0,
+                0,
+            ],
+            dtype=float,
+        )  # Initial velocity is 0
+
+        self.bbox = detection_bbox
+        self.predicted_bbox = detection_bbox
+        self.hits = 1
+        self.age = 0
+        self.time_since_update = 0
+
+    def predict(self):
+        self.kf.predict()
+
+        predicted_state_z = self.kf.x[:4]
+        self.predicted_bbox = center_wh_to_bbox(predicted_state_z)
+        self.age += 1
+        self.time_since_update += 1
+        return self.predicted_bbox
+
+    def update(self, detection_bbox):
+        measurement_z = bbox_to_center_wh(detection_bbox)
+        if measurement_z is not None:
+            self.kf.update(measurement_z)
+            self.bbox = detection_bbox
+            self.time_since_update = 0
+            self.age = 0
+            self.hits += 1
+        else:
+            print(
+                f"Warning: Failed to convert detection bbox {detection_bbox} for track {self.id}"
+            )
 
 
 def reset_tracker_state():
@@ -153,99 +259,82 @@ def tracker_soft(frame_data):
 
 
 def tracker_strong(frame_data):
-    global active_tracks, next_track_id
+    global active_tracks_kalman, next_track_id_kalman
 
     current_detections = frame_data["data"]
 
-    # Filter valid detections and calculate centers
+    predicted_track_bboxes = []
+    track_ids_list = list(active_tracks_kalman.keys())
+    for track_id in track_ids_list:
+        pred_bbox = active_tracks_kalman[track_id].predict()
+        predicted_track_bboxes.append(pred_bbox)
+
     valid_detections = []
+    valid_detection_indices = []
     for i, det in enumerate(current_detections):
         if det["bounding_box"]:
-            center = get_bbox_center(det["bounding_box"])
-            if center:
-                valid_detections.append(
-                    {
-                        "original_index": i,
-                        "bbox": det["bounding_box"],
-                        "center": center,
-                        "matched": False,
-                    }
-                )
+            valid_detections.append(det["bounding_box"])
+            valid_detection_indices.append(i)
 
-    # Get active track IDs from previous frame
-    track_ids = list(active_tracks.keys())
+    matched_indices_list = []
+    unmatched_detections = list(range(len(valid_detections)))
+    unmatched_tracks = list(range(len(track_ids_list)))
 
-    # Prepare indices and sets for matching
-    detection_indices = list(range(len(valid_detections)))
-    unmatched_tracks = set(track_ids)
-    unmatched_detections = set(detection_indices)
-
-    # Combined IoU + Distance
-    matched_pairs = []
-    if track_ids and detection_indices:
-        cost_matrix = np.full((len(track_ids), len(detection_indices)), float("inf"))
-
-        for t_idx, track_id in enumerate(track_ids):
-            track_bbox = active_tracks[track_id]["bbox"]
-            track_center = get_bbox_center(track_bbox)
-
-            for d_idx in detection_indices:
-                det_info = valid_detections[d_idx]
-                det_bbox = det_info["bbox"]
-                det_center = det_info["center"]
-
-                # Calculate both metrics
-                iou = calc_iou(track_bbox, det_bbox)
-                dist = calc_distance(track_center, det_center)
-
-                if iou > IOU_THRESHOLD_STRONG and dist < DISTANCE_THRESHOLD_STRONG:
+    if len(valid_detections) > 0 and len(predicted_track_bboxes) > 0:
+        cost_matrix = np.ones((len(predicted_track_bboxes), len(valid_detections)))
+        for t_idx, pred_bbox in enumerate(predicted_track_bboxes):
+            for d_idx, det_bbox in enumerate(valid_detections):
+                # Ensure bboxes are valid numpy arrays for calc_iou
+                pred_bbox_np = np.array(pred_bbox) if pred_bbox is not None else None
+                det_bbox_np = np.array(det_bbox)
+                iou = calc_iou(pred_bbox_np, det_bbox_np)
+                if iou > IOU_THRESHOLD_STRONG:
                     cost_matrix[t_idx, d_idx] = 1.0 - iou
                 else:
-                    cost_matrix[t_idx, d_idx] = 10000.0
+                    cost_matrix[t_idx, d_idx] = 1.0  # High cost if below threshold
 
-        # Hungarian algo
+        # Hungarian algorithm
         matched_indices_row, matched_indices_col = linear_sum_assignment(cost_matrix)
 
+        # Filter matches based on the cost (IoU threshold)
         for t_idx, d_idx in zip(matched_indices_row, matched_indices_col):
             if cost_matrix[t_idx, d_idx] < (1.0 - IOU_THRESHOLD_STRONG):
-                track_id = track_ids[t_idx]
-                matched_pairs.append((track_id, d_idx))
-                unmatched_tracks.discard(track_id)
-                unmatched_detections.discard(d_idx)
-                valid_detections[d_idx]["matched"] = True
+                matched_indices_list.append((t_idx, d_idx))
+                if t_idx in unmatched_tracks:
+                    unmatched_tracks.remove(t_idx)
+                if d_idx in unmatched_detections:
+                    unmatched_detections.remove(d_idx)
 
-    for track_id, det_idx in matched_pairs:
-        original_det_index = valid_detections[det_idx]["original_index"]
-        active_tracks[track_id]["bbox"] = valid_detections[det_idx]["bbox"]
-        active_tracks[track_id]["age"] = 0
-        active_tracks[track_id]["hits"] += 1
+    for t_idx, d_idx in matched_indices_list:
+        track_id = track_ids_list[t_idx]
+        detection_bbox = valid_detections[d_idx]
+        active_tracks_kalman[track_id].update(detection_bbox)
+        # Assign track_id to the original detection object
+        original_det_index = valid_detection_indices[d_idx]
         current_detections[original_det_index]["track_id"] = track_id
 
-    tracks_to_delete = []
-    for track_id in unmatched_tracks:
-        active_tracks[track_id]["age"] += 1
-        if active_tracks[track_id]["age"] > MAX_AGE_STRONG:
-            tracks_to_delete.append(track_id)
-
-    for det_idx in unmatched_detections:
-        original_det_index = valid_detections[det_idx]["original_index"]
-        new_id = next_track_id
-        active_tracks[new_id] = {
-            "bbox": valid_detections[det_idx]["bbox"],
-            "age": 0,
-            "hits": 1,
-            "id": new_id,
-        }
+    for d_idx in unmatched_detections:
+        detection_bbox = valid_detections[d_idx]
+        original_det_index = valid_detection_indices[d_idx]
+        new_id = next_track_id_kalman
+        active_tracks_kalman[new_id] = KalmanTrack(detection_bbox, new_id)
         current_detections[original_det_index]["track_id"] = new_id
-        next_track_id += 1
+        next_track_id_kalman += 1
+
+    tracks_to_delete = []
+    for track_id, track in list(active_tracks_kalman.items()):
+        if track.time_since_update > MAX_AGE_STRONG:
+            tracks_to_delete.append(track_id)
+        else:
+            pass
 
     for track_id in tracks_to_delete:
-        if track_id in active_tracks:
-            del active_tracks[track_id]
+        if track_id in active_tracks_kalman:
+            del active_tracks_kalman[track_id]
 
-    for det in current_detections:
+    for i, det in enumerate(current_detections):
         if "track_id" not in det:
-            det["track_id"] = None
+            det["track_id"] = None  # Assign None if no track was assigned
 
     return frame_data
 
@@ -261,7 +350,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.send_text(str(country_balls))
 
     for frame_info in track_data:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.01)
 
         current_frame_data = {
             "frame_id": frame_info["frame_id"],

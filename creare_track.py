@@ -3,12 +3,18 @@ import random
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 
-# количество объектов
+
+# tracks_amount = 5
+# tracks_amount = 10
 tracks_amount = 20
-# на сколько пикселей рамка объектов может ложно смещаться (эмуляция не идеальной детекции)
-random_range = 3
-# с какой вероятностью объект на фрейме может быть не найдет детектором
-bb_skip_percent = .1
+
+# random_range = 3
+# bb_skip_percent = .1
+# random_range = 5
+# bb_skip_percent = .25
+random_range = 10
+bb_skip_percent = .5
+
 
 width = 1000
 height = 800
